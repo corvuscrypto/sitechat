@@ -33,10 +33,14 @@ func (c *Client) cleanup() {
 	c.clientList = nil
 }
 
+var readLimitMessage = []byte(`{"type":"error","message":"message too long"}`)
+
 func (c *Client) waitForMessages() {
 	for {
 		mType, rawMessage, err := c.Socket.ReadMessage()
-		if err != nil {
+		if err == websocket.ErrReadLimit {
+			c.Socket.WriteMessage(websocket.TextMessage, readLimitMessage)
+		} else if err != nil {
 			c.cleanup()
 			return
 		}
@@ -109,6 +113,7 @@ func NewClient(w http.ResponseWriter, r *http.Request) *Client {
 	client.Username = generateUsername()
 	client.Path = path
 	client.Socket, _ = upgrader.Upgrade(w, r, nil)
+	client.Socket.SetReadLimit(500)
 	client.LastMessageSent = time.Now()
 	return client
 }
