@@ -7,7 +7,7 @@ import (
 
 func connectHandler(w http.ResponseWriter, r *http.Request) {
 	host := strings.ToLower(r.URL.Query().Get("host"))
-	if host == "" {
+	if host == "" || !isAllowedHost(host) {
 		return
 	}
 	client := NewClient(w, r)

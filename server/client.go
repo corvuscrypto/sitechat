@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,7 @@ type Client struct {
 	LastMessageSent time.Time
 	Socket          *websocket.Conn // change this to websocket type later
 	Path            string
+	Host            string
 	clientList      *ClientList
 }
 
@@ -32,13 +35,47 @@ func (c *Client) cleanup() {
 
 func (c *Client) waitForMessages() {
 	for {
-		mType, message, err := c.Socket.ReadMessage()
+		mType, rawMessage, err := c.Socket.ReadMessage()
 		if err != nil {
 			c.cleanup()
 			return
 		}
 		if mType == websocket.TextMessage {
-			c.clientList.BroadcastMessage(messageToJSON(c.Username, message))
+			evt := new(event)
+			err := json.Unmarshal(rawMessage, evt)
+			if err != nil {
+				continue
+			}
+			switch evt.Type {
+			case "location":
+				location := new(locationUpdate)
+				if err := json.Unmarshal(evt.Data, location); err != nil {
+					continue
+				}
+				normalizedHost := strings.ToLower(location.Host)
+				if normalizedHost != c.Host {
+					if !isAllowedHost(normalizedHost) {
+						c.cleanup()
+						return
+					}
+					c.Host = normalizedHost
+					switchClientList(c, normalizedHost)
+				}
+				c.Path = location.Path
+
+			case "message":
+				message := &messageEvent{
+					Username: c.Username,
+				}
+				err := json.Unmarshal(evt.Data, message)
+				if err != nil {
+					continue
+				}
+				c.clientList.BroadcastMessage(message, c.Path)
+
+			default:
+				continue
+			}
 		}
 	}
 }
@@ -52,16 +89,24 @@ func (c *Client) sendMessage(message []byte) {
 	}
 }
 
+func switchClientList(c *Client, host string) {
+	currentList := c.clientList
+	newList, ok := siteBuckets[host]
+	if !ok {
+		newList = NewClientList()
+		siteBuckets[host] = newList
+	}
+	currentList.RemoveClient(c)
+	newList.AddClient(c)
+	c.clientList = newList
+}
+
 // NewClient is a constructor for creating a new client based on a connect
 // request.
 func NewClient(w http.ResponseWriter, r *http.Request) *Client {
-	username := r.URL.Query().Get("username")
 	path := r.URL.Query().Get("path")
-	if username == "" {
-		return nil
-	}
 	client := new(Client)
-	client.Username = username
+	client.Username = generateUsername()
 	client.Path = path
 	client.Socket, _ = upgrader.Upgrade(w, r, nil)
 	client.LastMessageSent = time.Now()
@@ -105,8 +150,12 @@ func (c *ClientList) RemoveClient(client *Client) {
 
 // BroadcastMessage takes a message and Broadcasts it to all clients in the
 // internal slice
-func (c *ClientList) BroadcastMessage(message []byte) {
-	for _, client := range c.clients {
-		client.sendMessage(message)
+func (c *ClientList) BroadcastMessage(message *messageEvent, path string) {
+	if messageBytes, err := json.Marshal(message); err == nil {
+		for _, client := range c.clients {
+			if client.Path == path {
+				client.sendMessage(messageBytes)
+			}
+		}
 	}
 }
